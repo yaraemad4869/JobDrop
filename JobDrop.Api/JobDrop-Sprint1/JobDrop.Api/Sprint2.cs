@@ -357,6 +357,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_S2Decisions_Application_
 public sealed record S2CreateJobRequest(
     string Title,
     string Description,
+    Guid CompanyId,
     string? EmploymentType,
     string? WorkArrangement,
     string? Country,
@@ -399,6 +400,41 @@ public static class Sprint2Api
         Guid.TryParse(p.FindFirstValue(ClaimTypes.NameIdentifier) ??
                       p.FindFirstValue(JwtRegisteredClaimNames.Sub), out var id) ? id : Guid.Empty;
 
+    private static async Task AcquireTransactionLockAsync(
+        JobDropDbContext db,
+        string resource)
+    {
+        await db.Database.ExecuteSqlInterpolatedAsync($@"
+DECLARE @lockResult int;
+
+EXEC @lockResult = sys.sp_getapplock
+    @Resource = {resource},
+    @LockMode = 'Exclusive',
+    @LockOwner = 'Transaction',
+    @LockTimeout = 15000;
+
+IF @lockResult < 0
+    THROW 51000, 'Could not acquire Sprint 2 application lock.', 1;
+");
+    }
+
+    private static Task AcquireCandidateQuotaLockAsync(
+        JobDropDbContext db,
+        Guid candidateProfileId,
+        DateTime utcDate)
+    {
+        var resource = $"s2:candidate:{candidateProfileId:N}:{utcDate.Date.Ticks}";
+        return AcquireTransactionLockAsync(db, resource);
+    }
+
+    public static Task AcquireCompanyCapacityLockAsync(
+        JobDropDbContext db,
+        Guid companyId,
+        DateTime utcDate)
+    {
+        var resource = $"s2:company:{companyId:N}:{utcDate.Date.Ticks}";
+        return AcquireTransactionLockAsync(db, resource);
+    }
     private static async Task<bool> CanManageCompany(
         JobDropDbContext db, Guid companyId, Guid userId)
     {
@@ -427,7 +463,6 @@ public static class Sprint2Api
             JobDropDbContext db) =>
         {
             var userId = CurrentUser(principal);
-            var companyId = principal.FindFirst("company_id")?.Value;
 
             if (string.IsNullOrWhiteSpace(request.Title) ||
                 string.IsNullOrWhiteSpace(request.Description))
@@ -438,8 +473,10 @@ public static class Sprint2Api
                  request.SalaryMin > request.SalaryMax))
                 return Results.BadRequest(new { error = "Invalid salary range." });
 
-            if (!Guid.TryParse(companyId, out var selectedCompany))
-                return Results.BadRequest(new { error = "Send the companyId in the request body using the company route." });
+            var selectedCompany = request.CompanyId;
+
+            if (selectedCompany == Guid.Empty)
+                return Results.BadRequest(new { error = "CompanyId is required." });
 
             if (!await CanManageCompany(db, selectedCompany, userId))
                 return Results.Forbid();
@@ -525,7 +562,10 @@ public static class Sprint2Api
         jobs.MapGet("/{jobId:guid}", async (Guid jobId, JobDropDbContext db) =>
         {
             var job = await db.Set<S2Job>().AsNoTracking()
-                .FirstOrDefaultAsync(x => x.Id == jobId);
+                .FirstOrDefaultAsync(x =>
+                    x.Id == jobId &&
+                    x.Status == "Published" &&
+                    (x.ExpiresAtUtc == null || x.ExpiresAtUtc > DateTime.UtcNow));
             if (job is null) return Results.NotFound();
 
             var requirements = await db.Set<S2JobRequirement>().AsNoTracking()
@@ -603,6 +643,18 @@ public static class Sprint2Api
             var dayStart = now.Date;
             var dayEnd = dayStart.AddDays(1);
 
+            await AcquireCandidateQuotaLockAsync(
+                db, profileId.Value, dayStart);
+
+            await AcquireCompanyCapacityLockAsync(
+                db, job.CompanyId, dayStart);
+
+            // Recheck after acquiring the lock to handle simultaneous requests.
+            if (await db.Set<S2Application>().AnyAsync(x =>
+                x.JobId == jobId &&
+                x.CandidateProfileId == profileId.Value))
+                return Results.Conflict(new { error = "You have already applied to this job." });
+
             var alreadyAppliedToCompany = await db.Set<S2QuotaUsage>().AnyAsync(x =>
                 x.CandidateProfileId == profileId.Value &&
                 x.CompanyId == job.CompanyId && x.UtcDate == dayStart);
@@ -615,7 +667,7 @@ public static class Sprint2Api
 
             var deliveredCount = await db.Set<S2Application>().CountAsync(x =>
                 x.CompanyId == job.CompanyId &&
-                x.Status == "Delivered" &&
+                x.DeliveredAtUtc.HasValue &&
                 x.DeliveredAtUtc >= dayStart &&
                 x.DeliveredAtUtc < dayEnd);
 
@@ -851,8 +903,10 @@ public static class Sprint2Api
 
             var today = DateTime.UtcNow.Date;
             var delivered = await db.Set<S2Application>().CountAsync(x =>
-                x.CompanyId == companyId && x.Status == "Delivered" &&
-                x.DeliveredAtUtc >= today && x.DeliveredAtUtc < today.AddDays(1));
+                x.CompanyId == companyId &&
+                x.DeliveredAtUtc.HasValue &&
+                x.DeliveredAtUtc >= today &&
+                x.DeliveredAtUtc < today.AddDays(1));
 
             return Results.Ok(new
             {
@@ -926,9 +980,12 @@ public sealed class Sprint2QueueWorker(
 
         foreach (var entry in pending)
         {
+            await Sprint2Api.AcquireCompanyCapacityLockAsync(
+                db, entry.CompanyId, start);
+
             var delivered = await db.Set<S2Application>().CountAsync(x =>
                 x.CompanyId == entry.CompanyId &&
-                x.Status == "Delivered" &&
+                x.DeliveredAtUtc.HasValue &&
                 x.DeliveredAtUtc >= start &&
                 x.DeliveredAtUtc < end, cancellationToken);
 
