@@ -880,6 +880,30 @@ IF @lockResult < 0
                 });
             }
 
+            // A real response begins at Screening or later.
+            // Viewed is intentionally not treated as a response.
+            var isRealResponse =
+                target.Equals("Screening", StringComparison.OrdinalIgnoreCase) ||
+                target.Equals("Shortlisted", StringComparison.OrdinalIgnoreCase) ||
+                target.Equals("Assessment", StringComparison.OrdinalIgnoreCase) ||
+                target.Equals("InterviewScheduled", StringComparison.OrdinalIgnoreCase) ||
+                target.Equals("InterviewCompleted", StringComparison.OrdinalIgnoreCase) ||
+                target.Equals("OfferExtended", StringComparison.OrdinalIgnoreCase) ||
+                target.Equals("Hired", StringComparison.OrdinalIgnoreCase) ||
+                target.Equals("Rejected", StringComparison.OrdinalIgnoreCase);
+
+            if (isRealResponse)
+            {
+                var sla = await db.Set<S3ApplicationSla>()
+                    .FirstOrDefaultAsync(x => x.ApplicationId == applicationId);
+
+                if (sla is not null && !sla.RespondedAtUtc.HasValue)
+                {
+                    sla.RespondedAtUtc = DateTime.UtcNow;
+                    sla.Status = "Responded";
+                }
+            }
+
             await db.SaveChangesAsync();
             return Results.Ok(application);
         });

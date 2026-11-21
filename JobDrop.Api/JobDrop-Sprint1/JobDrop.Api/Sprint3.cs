@@ -39,6 +39,11 @@ public sealed class S3ApplicationSla
     public DateTime DueAtUtc { get; set; }
     public DateTime? RespondedAtUtc { get; set; }
     public string Status { get; set; } = "Pending";
+
+    // Immutable calendar snapshot captured when the SLA starts.
+    public string WorkingDaysSnapshot { get; set; } = "1,2,3,4,5";
+    public string HolidaysSnapshot { get; set; } = "";
+    public string TimeZoneIdSnapshot { get; set; } = "UTC";
 }
 
 public sealed class S3Review
@@ -188,6 +193,27 @@ END;
 ";
         await db.Database.ExecuteSqlRawAsync(sql);
 
+        // Additive migration: safe for existing databases and existing SLA records.
+        await db.Database.ExecuteSqlRawAsync(@"
+IF OBJECT_ID(N'dbo.S3ApplicationSlas', N'U') IS NOT NULL
+BEGIN
+    IF COL_LENGTH(N'dbo.S3ApplicationSlas', N'WorkingDaysSnapshot') IS NULL
+        ALTER TABLE dbo.S3ApplicationSlas
+        ADD WorkingDaysSnapshot nvarchar(100) NOT NULL
+        CONSTRAINT DF_S3Sla_WorkingDays DEFAULT N'1,2,3,4,5' WITH VALUES;
+
+    IF COL_LENGTH(N'dbo.S3ApplicationSlas', N'HolidaysSnapshot') IS NULL
+        ALTER TABLE dbo.S3ApplicationSlas
+        ADD HolidaysSnapshot nvarchar(max) NOT NULL
+        CONSTRAINT DF_S3Sla_Holidays DEFAULT N'' WITH VALUES;
+
+    IF COL_LENGTH(N'dbo.S3ApplicationSlas', N'TimeZoneIdSnapshot') IS NULL
+        ALTER TABLE dbo.S3ApplicationSlas
+        ADD TimeZoneIdSnapshot nvarchar(100) NOT NULL
+        CONSTRAINT DF_S3Sla_TimeZone DEFAULT N'UTC' WITH VALUES;
+END;
+");
+
         await db.Database.ExecuteSqlRawAsync(@"
 IF OBJECT_ID(N'dbo.CandidateProfiles', N'U') IS NOT NULL
    AND COL_LENGTH(N'dbo.CandidateProfiles', N'WorkEligibility') IS NULL
@@ -241,68 +267,83 @@ public static class Sprint3Api
              x.Role == CompanyMemberRole.Recruiter));
     }
 
-    private static async Task<DateTime> AddBusinessHours(
-        JobDropDbContext db, Guid companyId, DateTime start, int hours)
+    private static async Task<DateTime> CalculateSlaDueUtc(
+        DateTime openedAtUtc,
+        string workingDaysSnapshot,
+        string holidaysSnapshot,
+        string timeZoneIdSnapshot)
     {
-        var calendar = await db.Set<S3CompanyCalendar>()
-            .AsNoTracking()
-            .FirstOrDefaultAsync(x => x.CompanyId == companyId)
-            ?? new S3CompanyCalendar { CompanyId = companyId };
-
-        var days = calendar.WorkingDays.Split(',')
-            .Select(x => int.TryParse(x.Trim(), out var d) ? d : -1)
+        var workingDays = workingDaysSnapshot
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(x => int.TryParse(x, out var day) ? day : -1)
             .Where(x => x >= 0 && x <= 6)
             .ToHashSet();
 
-        if (days.Count == 0)
-            days = new HashSet<int> { 1, 2, 3, 4, 5 };
+        if (workingDays.Count == 0)
+            workingDays = new HashSet<int> { 1, 2, 3, 4, 5 };
 
-        var holidays = (await db.Set<S3CompanyHoliday>()
-            .AsNoTracking()
-            .Where(x => x.CompanyId == companyId)
-            .Select(x => x.HolidayDate)
-            .ToListAsync()).ToHashSet();
+        var holidays = holidaysSnapshot
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(x => DateOnly.TryParse(x, out var date) ? date : (DateOnly?)null)
+            .Where(x => x.HasValue)
+            .Select(x => x!.Value)
+            .ToHashSet();
 
-        var current = start;
-        var remaining = TimeSpan.FromHours(hours);
-        var safety = 0;
-
-        while (remaining > TimeSpan.Zero && safety++ < 5000)
+        TimeZoneInfo zone;
+        try
         {
-            if (!days.Contains((int)current.DayOfWeek) ||
-                holidays.Contains(DateOnly.FromDateTime(current)))
-            {
-                current = current.Date.AddDays(1)
-                    .AddMinutes(calendar.WorkStartMinuteUtc);
-                continue;
-            }
-
-            var workStart = current.Date.AddMinutes(calendar.WorkStartMinuteUtc);
-            var workEnd = current.Date.AddMinutes(calendar.WorkEndMinuteUtc);
-
-            if (current < workStart) current = workStart;
-
-            if (current >= workEnd)
-            {
-                current = current.Date.AddDays(1)
-                    .AddMinutes(calendar.WorkStartMinuteUtc);
-                continue;
-            }
-
-            var available = workEnd - current;
-            var consumed = available < remaining ? available : remaining;
-            current = current.Add(consumed);
-            remaining -= consumed;
-
-            if (remaining > TimeSpan.Zero)
-                current = current.Date.AddDays(1)
-                    .AddMinutes(calendar.WorkStartMinuteUtc);
+            zone = TimeZoneInfo.FindSystemTimeZoneById(
+                string.IsNullOrWhiteSpace(timeZoneIdSnapshot) ? "UTC" : timeZoneIdSnapshot);
+        }
+        catch
+        {
+            zone = TimeZoneInfo.Utc;
         }
 
-        if (safety >= 5000)
-            throw new InvalidOperationException("Could not calculate the SLA deadline.");
+        var currentUtc = DateTime.SpecifyKind(openedAtUtc, DateTimeKind.Utc);
+        var remaining = TimeSpan.FromHours(48);
+        var safety = 0;
 
-        return current;
+        while (remaining > TimeSpan.Zero && safety++ < 20000)
+        {
+            var local = TimeZoneInfo.ConvertTimeFromUtc(currentUtc, zone);
+            var localDate = DateOnly.FromDateTime(local);
+
+            var isWorkingDay =
+                workingDays.Contains((int)local.DayOfWeek) &&
+                !holidays.Contains(localDate);
+
+            if (!isWorkingDay)
+            {
+                var nextLocalMidnight = local.Date.AddDays(1);
+                var nextUtc = TimeZoneInfo.ConvertTimeToUtc(
+                    DateTime.SpecifyKind(nextLocalMidnight, DateTimeKind.Unspecified), zone);
+
+                if (nextUtc <= currentUtc)
+                    nextUtc = currentUtc.AddHours(1);
+
+                currentUtc = nextUtc;
+                continue;
+            }
+
+            // Consume elapsed time only while the local date is a working day.
+            var nextLocalMidnightUtc = TimeZoneInfo.ConvertTimeToUtc(
+                DateTime.SpecifyKind(local.Date.AddDays(1), DateTimeKind.Unspecified), zone);
+
+            if (nextLocalMidnightUtc <= currentUtc)
+                nextLocalMidnightUtc = currentUtc.AddHours(1);
+
+            var available = nextLocalMidnightUtc - currentUtc;
+            var consumed = available < remaining ? available : remaining;
+
+            currentUtc = currentUtc.Add(consumed);
+            remaining -= consumed;
+        }
+
+        if (remaining > TimeSpan.Zero)
+            throw new InvalidOperationException("SLA deadline calculation exceeded its safety limit.");
+
+        return DateTime.SpecifyKind(currentUtc, DateTimeKind.Utc);
     }
 
     private static async Task<(int Score, bool Eligible, string[] Missing)> ScoreCandidate(
@@ -310,78 +351,148 @@ public static class Sprint3Api
     {
         var profile = await db.CandidateProfiles
             .AsNoTracking()
-            .FirstOrDefaultAsync(x => x.Id == profileId);
-
-        if (profile is null) return (0, false, ["Candidate profile not found"]);
-
-        var skills = await db.CandidateSkills
-            .AsNoTracking()
-            .Where(x => x.CandidateProfileId == profileId)
-            .Select(x => x.Name)
+            .Include(x => x.Skills)
+            .Include(x => x.WorkExperiences)
+            .Include(x => x.Educations)
+                .ThenInclude(x => x.Institution)
+            .Include(x => x.Certifications)
             .ToListAsync();
 
-        var normalizedSkills = skills
-            .Where(x => !string.IsNullOrWhiteSpace(x))
-            .Select(x => x.Trim())
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var candidate = profile.FirstOrDefault(x => x.Id == profileId);
+        if (candidate is null)
+            return (0, false, new[] { "Candidate profile not found" });
+
+        static string Normalize(string? value) =>
+            (value ?? "").Trim().ToLowerInvariant();
+
+        static bool ContainsEvidence(IEnumerable<string?> values, string required)
+        {
+            var target = Normalize(required);
+            if (target.Length == 0) return true;
+
+            return values
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(Normalize)
+                .Any(x => x == target || x.Contains(target) || target.Contains(x));
+        }
+
+        var evidence = new List<string?>();
+
+        evidence.AddRange(candidate.Skills.Select(x => x.Name));
+        evidence.AddRange(candidate.WorkExperiences.SelectMany(x =>
+            new[] { x.JobTitle, x.Description, x.EmployerName }));
+        evidence.AddRange(candidate.Educations.SelectMany(x =>
+            new[] { x.Qualification, x.FieldOfStudy, x.Program, x.Faculty, x.Campus, x.Institution?.Name }));
+        evidence.AddRange(candidate.Certifications.SelectMany(x =>
+            new[] { x.Name, x.Issuer }));
 
         var requirements = await db.Set<S2JobRequirement>()
             .AsNoTracking()
             .Where(x => x.JobId == job.Id)
             .ToListAsync();
 
-        var missing = new List<string>();
-        var mandatory = requirements.Where(x => x.IsMandatory).ToList();
-
-        foreach (var requirement in mandatory)
-        {
-            var text = requirement.Description.Trim();
-            if (text.Length == 0) continue;
-
-            var matched = normalizedSkills.Contains(text) ||
-                normalizedSkills.Any(s =>
-                    s.Contains(text, StringComparison.OrdinalIgnoreCase) ||
-                    text.Contains(s, StringComparison.OrdinalIgnoreCase));
-
-            if (!matched)
-                missing.Add(text);
-        }
+        var preferences = await db.Set<S2JobPreference>()
+            .AsNoTracking()
+            .Where(x => x.JobId == job.Id)
+            .ToListAsync();
 
         var rule = await db.Set<S3MatchRule>()
             .AsNoTracking()
             .FirstOrDefaultAsync(x => x.JobId == job.Id);
 
-        var ruleSkills = (rule?.RequiredSkills ?? "")
-            .Split(',', StringSplitOptions.RemoveEmptyEntries |
-                        StringSplitOptions.TrimEntries);
+        var missing = new List<string>();
+        var scoredCriteria = new List<bool>();
 
-        foreach (var required in ruleSkills)
+        foreach (var requirement in requirements)
         {
-            if (!normalizedSkills.Contains(required) &&
-                !normalizedSkills.Any(s =>
-                    s.Contains(required, StringComparison.OrdinalIgnoreCase)))
-                missing.Add(required);
+            var description = requirement.Description?.Trim() ?? "";
+            if (description.Length == 0) continue;
+
+            var matched = ContainsEvidence(evidence, description);
+
+            if (requirement.IsMandatory && !matched)
+                missing.Add(description);
+
+            scoredCriteria.Add(matched);
+        }
+
+        var requiredSkills = (rule?.RequiredSkills ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        foreach (var skill in requiredSkills)
+        {
+            var matched = ContainsEvidence(candidate.Skills.Select(x => x.Name), skill);
+            if (!matched) missing.Add("Skill: " + skill);
+            scoredCriteria.Add(matched);
         }
 
         var locationRequired = rule?.RequireLocationMatch ?? false;
-        if (locationRequired &&
-            !string.IsNullOrWhiteSpace(job.Country) &&
-            !string.Equals(profile.ResidenceCountry, job.Country,
-                StringComparison.OrdinalIgnoreCase))
+        if (locationRequired && !string.IsNullOrWhiteSpace(job.Country))
         {
-            missing.Add("Location: " + job.Country);
+            var locationMatched = string.Equals(
+                Normalize(candidate.ResidenceCountry),
+                Normalize(job.Country),
+                StringComparison.Ordinal);
+
+            if (!locationMatched)
+                missing.Add("Location: " + job.Country);
+
+            scoredCriteria.Add(locationMatched);
         }
 
-        var allRequired = mandatory.Count + ruleSkills.Length +
-            (locationRequired && !string.IsNullOrWhiteSpace(job.Country) ? 1 : 0);
+        if (!string.IsNullOrWhiteSpace(job.WorkArrangement))
+        {
+            var arrangementMatched =
+                string.IsNullOrWhiteSpace(candidate.PreferredWorkArrangement) ||
+                Normalize(candidate.PreferredWorkArrangement) == "any" ||
+                Normalize(candidate.PreferredWorkArrangement) == Normalize(job.WorkArrangement);
 
-        var matchedCount = Math.Max(0, allRequired - missing.Count);
-        var score = allRequired == 0 ? 100 :
-            (int)Math.Round((double)matchedCount / allRequired * 100);
+            scoredCriteria.Add(arrangementMatched);
+        }
+
+        foreach (var preference in preferences)
+        {
+            var type = Normalize(preference.PreferenceType);
+            var value = preference.Value?.Trim() ?? "";
+            if (value.Length == 0) continue;
+
+            bool matched;
+
+            if (type.Contains("institution") || type.Contains("university"))
+                matched = ContainsEvidence(
+                    candidate.Educations.Select(x => x.Institution?.Name), value);
+            else if (type.Contains("qualification") || type.Contains("education"))
+                matched = ContainsEvidence(
+                    candidate.Educations.SelectMany(x =>
+                        new[] { x.Qualification, x.FieldOfStudy, x.Program }), value);
+            else if (type.Contains("certification"))
+                matched = ContainsEvidence(candidate.Certifications.Select(x => x.Name), value);
+            else if (type.Contains("eligibility") || type.Contains("work eligibility"))
+                matched = ContainsEvidence(new[] { candidate.WorkEligibility }, value);
+            else if (type.Contains("location") || type.Contains("country"))
+                matched = ContainsEvidence(new[] {
+                    candidate.ResidenceCountry, candidate.ResidenceCity
+                }, value);
+            else if (type.Contains("arrangement") || type.Contains("work"))
+                matched = string.IsNullOrWhiteSpace(candidate.PreferredWorkArrangement) ||
+                    Normalize(candidate.PreferredWorkArrangement) == Normalize(value);
+            else
+                matched = ContainsEvidence(evidence, value);
+
+            // Preferences influence ranking, not hard eligibility.
+            scoredCriteria.Add(matched);
+        }
+
+        var score = scoredCriteria.Count == 0
+            ? 100
+            : (int)Math.Round(scoredCriteria.Count(x => x) * 100.0 / scoredCriteria.Count);
 
         var minimum = rule?.MinimumScore ?? 50;
-        return (score, missing.Count == 0 && score >= minimum,
-            missing.Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+        var distinctMissing = missing
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return (score, distinctMissing.Length == 0 && score >= minimum, distinctMissing);
     }
 
     public static void MapSprint3(this WebApplication app)
@@ -648,7 +759,7 @@ public static class Sprint3Api
 
             if (application is null) return Results.NotFound();
 
-            if (!await CanViewCompany(db, application.CompanyId, UserId(principal)) &&
+            if (!await CanManageCompany(db, application.CompanyId, UserId(principal)) &&
                 !principal.IsInRole(Roles.PlatformAdmin))
                 return Results.Forbid();
 
@@ -661,7 +772,34 @@ public static class Sprint3Api
             if (sla is not null) return Results.Ok(sla);
 
             var now = DateTime.UtcNow;
-            var due = await AddBusinessHours(db, application.CompanyId, now, 48);
+
+            var calendar = await db.Set<S3CompanyCalendar>()
+                .AsNoTracking()
+                .FirstOrDefaultAsync(x => x.CompanyId == application.CompanyId)
+                ?? new S3CompanyCalendar { CompanyId = application.CompanyId };
+
+            var workingDaysSnapshot = string.Join(",",
+                calendar.WorkingDays.Split(',',
+                    StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Select(x => int.TryParse(x, out var day) ? day : -1)
+                    .Where(x => x >= 0 && x <= 6)
+                    .Distinct());
+
+            if (string.IsNullOrWhiteSpace(workingDaysSnapshot))
+                workingDaysSnapshot = "1,2,3,4,5";
+
+            var holidayDates = await db.Set<S3CompanyHoliday>()
+                .AsNoTracking()
+                .Where(x => x.CompanyId == application.CompanyId)
+                .Select(x => x.HolidayDate)
+                .ToListAsync();
+
+            var holidaysSnapshot = string.Join(",",
+                holidayDates.OrderBy(x => x).Select(x => x.ToString("yyyy-MM-dd")));
+
+            var timeZoneSnapshot = "UTC";
+            var due = await CalculateSlaDueUtc(
+                now, workingDaysSnapshot, holidaysSnapshot, timeZoneSnapshot);
 
             sla = new S3ApplicationSla
             {
@@ -669,7 +807,10 @@ public static class Sprint3Api
                 CompanyId = application.CompanyId,
                 OpenedAtUtc = now,
                 DueAtUtc = due,
-                Status = "Pending"
+                Status = "Pending",
+                WorkingDaysSnapshot = workingDaysSnapshot,
+                HolidaysSnapshot = holidaysSnapshot,
+                TimeZoneIdSnapshot = timeZoneSnapshot
             };
 
             db.Set<S3ApplicationSla>().Add(sla);
@@ -712,13 +853,40 @@ public static class Sprint3Api
 
             var items = await query.OrderBy(x => x.DueAtUtc).ToListAsync();
 
+            var deliveredApplications = await db.Set<S2Application>()
+                .AsNoTracking()
+                .Where(x => x.CompanyId == companyId && x.DeliveredAtUtc.HasValue)
+                .Select(x => new { x.Id, x.DeliveredAtUtc, x.Status })
+                .ToListAsync();
+
+            var openedIds = items.Select(x => x.ApplicationId).ToHashSet();
+            var unopened = deliveredApplications
+                .Where(x => !openedIds.Contains(x.Id))
+                .ToList();
+
+            var respondedItems = items
+                .Where(x => x.RespondedAtUtc.HasValue)
+                .ToList();
+
+            var averageResponseHours = respondedItems.Count == 0
+                ? (double?)null
+                : respondedItems.Average(x =>
+                    (x.RespondedAtUtc!.Value - x.OpenedAtUtc).TotalHours);
+
             return Results.Ok(new
             {
-                total = items.Count,
-                pending = items.Count(x => x.Status == "Pending"),
+                totalDelivered = deliveredApplications.Count,
+                opened = items.Count,
+                unopened = unopened.Count,
+                pendingResponse = items.Count(x => x.Status == "Pending"),
                 overdue = items.Count(x =>
                     x.Status == "Pending" && x.DueAtUtc < now),
-                responded = items.Count(x => x.Status == "Responded"),
+                responded = respondedItems.Count,
+                responseRatePercent = items.Count == 0
+                    ? 0
+                    : Math.Round(respondedItems.Count * 100.0 / items.Count, 2),
+                averageResponseHours,
+                unopenedApplications = unopened,
                 items
             });
         });
@@ -742,6 +910,23 @@ public static class Sprint3Api
 
             if (application.Status is not ("Hired" or "Rejected" or "Withdrawn"))
                 return Results.Conflict(new { error = "Reviews are allowed after the application reaches a final status." });
+
+            var verifiedInteraction = await db.Set<S2ApplicationEvent>()
+                .AsNoTracking()
+                .AnyAsync(x =>
+                    x.ApplicationId == applicationId &&
+                    (x.ToStatus == "Screening" ||
+                     x.ToStatus == "Shortlisted" ||
+                     x.ToStatus == "Assessment" ||
+                     x.ToStatus == "InterviewScheduled" ||
+                     x.ToStatus == "InterviewCompleted" ||
+                     x.ToStatus == "OfferExtended" ||
+                     x.ToStatus == "Hired"));
+
+            if (!verifiedInteraction)
+                return Results.Conflict(new {
+                    error = "A review requires a verified recruitment interaction beyond Viewed."
+                });
 
             var candidate = await db.CandidateProfiles
                 .FirstOrDefaultAsync(x => x.Id == application.CandidateProfileId);
