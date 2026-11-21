@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
@@ -245,73 +245,212 @@ candidates.MapPut("/me", async (CandidateProfileRequest request, ClaimsPrincipal
     return Results.Ok(p);
 });
 
-candidates.MapPut("/me/experience", async (List<WorkExperienceRequest> items, ClaimsPrincipal principal, JobDropDbContext db) =>
+candidates.MapPut("/me/experience", async (
+    List<WorkExperienceRequest> items,
+    ClaimsPrincipal principal,
+    JobDropDbContext db) =>
 {
     var id = UserId(principal);
-    var p = await db.CandidateProfiles.Include(x => x.WorkExperiences).FirstOrDefaultAsync(x => x.UserId == id);
-    if (p is null) return Results.NotFound(new { error = "Create candidate profile first." });
-    db.WorkExperiences.RemoveRange(p.WorkExperiences);
-    foreach (var x in items) p.WorkExperiences.Add(new WorkExperience {
-        JobTitle = x.JobTitle, EmployerName = x.EmployerName, Description = x.Description,
-        StartDate = x.StartDate, EndDate = x.EndDate
-    });
+
+    var profileId = await db.CandidateProfiles
+        .Where(x => x.UserId == id)
+        .Select(x => (Guid?)x.Id)
+        .FirstOrDefaultAsync();
+
+    if (profileId is null)
+        return Results.NotFound(new { error = "Create candidate profile first." });
+
+    await using var transaction = await db.Database.BeginTransactionAsync();
+
+    await db.WorkExperiences
+        .Where(x => x.CandidateProfileId == profileId.Value)
+        .ExecuteDeleteAsync();
+
+    var entities = items.Select(x => new WorkExperience
+    {
+        CandidateProfileId = profileId.Value,
+        JobTitle = x.JobTitle,
+        EmployerName = x.EmployerName,
+        Description = x.Description,
+        StartDate = x.StartDate,
+        EndDate = x.EndDate
+    }).ToList();
+
+    if (entities.Count > 0)
+        db.WorkExperiences.AddRange(entities);
+
     await db.SaveChangesAsync();
-    return Results.Ok(p.WorkExperiences);
+    await transaction.CommitAsync();
+
+    return Results.Ok(entities);
 });
 
-candidates.MapPut("/me/education", async (List<EducationRequest> items, ClaimsPrincipal principal, JobDropDbContext db) =>
+candidates.MapPut("/me/education", async (
+    List<EducationRequest> items,
+    ClaimsPrincipal principal,
+    JobDropDbContext db) =>
 {
     var id = UserId(principal);
-    var p = await db.CandidateProfiles.Include(x => x.Educations).FirstOrDefaultAsync(x => x.UserId == id);
-    if (p is null) return Results.NotFound(new { error = "Create candidate profile first." });
-    db.Educations.RemoveRange(p.Educations);
-    foreach (var x in items) p.Educations.Add(new EducationRecord {
-        InstitutionId = x.InstitutionId, Campus = x.Campus, Faculty = x.Faculty, Program = x.Program,
-        FieldOfStudy = x.FieldOfStudy, Qualification = x.Qualification, Status = x.Status,
-        GraduationYear = x.GraduationYear, EvidenceDocumentId = x.EvidenceDocumentId
-    });
+
+    var profileId = await db.CandidateProfiles
+        .Where(x => x.UserId == id)
+        .Select(x => (Guid?)x.Id)
+        .FirstOrDefaultAsync();
+
+    if (profileId is null)
+        return Results.NotFound(new { error = "Create candidate profile first." });
+
+    await using var transaction = await db.Database.BeginTransactionAsync();
+
+    await db.Educations
+        .Where(x => x.CandidateProfileId == profileId.Value)
+        .ExecuteDeleteAsync();
+
+    var entities = items.Select(x => new EducationRecord
+    {
+        CandidateProfileId = profileId.Value,
+        InstitutionId = x.InstitutionId,
+        Campus = x.Campus,
+        Faculty = x.Faculty,
+        Program = x.Program,
+        FieldOfStudy = x.FieldOfStudy,
+        Qualification = x.Qualification,
+        Status = x.Status,
+        GraduationYear = x.GraduationYear,
+        EvidenceDocumentId = x.EvidenceDocumentId
+    }).ToList();
+
+    if (entities.Count > 0)
+        db.Educations.AddRange(entities);
+
     await db.SaveChangesAsync();
-    return Results.Ok(p.Educations);
+    await transaction.CommitAsync();
+
+    return Results.Ok(entities);
 });
 
-candidates.MapPut("/me/skills", async (List<string> items, ClaimsPrincipal principal, JobDropDbContext db) =>
+candidates.MapPut("/me/skills", async (
+    List<string> items,
+    ClaimsPrincipal principal,
+    JobDropDbContext db) =>
 {
     var id = UserId(principal);
-    var p = await db.CandidateProfiles.Include(x => x.Skills).FirstOrDefaultAsync(x => x.UserId == id);
-    if (p is null) return Results.NotFound();
-    db.CandidateSkills.RemoveRange(p.Skills);
-    foreach (var name in items.Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase))
-        p.Skills.Add(new CandidateSkill { Name = name.Trim() });
+
+    var profileId = await db.CandidateProfiles
+        .Where(x => x.UserId == id)
+        .Select(x => (Guid?)x.Id)
+        .FirstOrDefaultAsync();
+
+    if (profileId is null)
+        return Results.NotFound();
+
+    var names = items
+        .Where(x => !string.IsNullOrWhiteSpace(x))
+        .Select(x => x.Trim())
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
+    await using var transaction = await db.Database.BeginTransactionAsync();
+
+    await db.CandidateSkills
+        .Where(x => x.CandidateProfileId == profileId.Value)
+        .ExecuteDeleteAsync();
+
+    var entities = names.Select(name => new CandidateSkill
+    {
+        CandidateProfileId = profileId.Value,
+        Name = name
+    }).ToList();
+
+    if (entities.Count > 0)
+        db.CandidateSkills.AddRange(entities);
+
     await db.SaveChangesAsync();
-    return Results.Ok(p.Skills);
+    await transaction.CommitAsync();
+
+    return Results.Ok(entities);
 });
 
-candidates.MapPut("/me/certifications", async (List<CertificationRequest> items, ClaimsPrincipal principal, JobDropDbContext db) =>
+candidates.MapPut("/me/certifications", async (
+    List<CertificationRequest> items,
+    ClaimsPrincipal principal,
+    JobDropDbContext db) =>
 {
     var id = UserId(principal);
-    var p = await db.CandidateProfiles.Include(x => x.Certifications).FirstOrDefaultAsync(x => x.UserId == id);
-    if (p is null) return Results.NotFound();
-    db.Certifications.RemoveRange(p.Certifications);
-    foreach (var x in items) p.Certifications.Add(new CandidateCertification {
-        Name = x.Name, Issuer = x.Issuer, CredentialId = x.CredentialId,
-        IssuedAt = x.IssuedAt, ExpiresAt = x.ExpiresAt, CredentialUrl = x.CredentialUrl
-    });
+
+    var profileId = await db.CandidateProfiles
+        .Where(x => x.UserId == id)
+        .Select(x => (Guid?)x.Id)
+        .FirstOrDefaultAsync();
+
+    if (profileId is null)
+        return Results.NotFound();
+
+    await using var transaction = await db.Database.BeginTransactionAsync();
+
+    await db.Certifications
+        .Where(x => x.CandidateProfileId == profileId.Value)
+        .ExecuteDeleteAsync();
+
+    var entities = items.Select(x => new CandidateCertification
+    {
+        CandidateProfileId = profileId.Value,
+        Name = x.Name,
+        Issuer = x.Issuer,
+        CredentialId = x.CredentialId,
+        IssuedAt = x.IssuedAt,
+        ExpiresAt = x.ExpiresAt,
+        CredentialUrl = x.CredentialUrl
+    }).ToList();
+
+    if (entities.Count > 0)
+        db.Certifications.AddRange(entities);
+
     await db.SaveChangesAsync();
-    return Results.Ok(p.Certifications);
+    await transaction.CommitAsync();
+
+    return Results.Ok(entities);
 });
 
-candidates.MapPut("/me/saved-locations", async (List<SavedLocationRequest> items, ClaimsPrincipal principal, JobDropDbContext db) =>
+candidates.MapPut("/me/saved-locations", async (
+    List<SavedLocationRequest> items,
+    ClaimsPrincipal principal,
+    JobDropDbContext db) =>
 {
     var id = UserId(principal);
-    var p = await db.CandidateProfiles.Include(x => x.SavedLocations).FirstOrDefaultAsync(x => x.UserId == id);
-    if (p is null) return Results.NotFound();
-    db.SavedLocations.RemoveRange(p.SavedLocations);
-    foreach (var x in items) p.SavedLocations.Add(new SavedLocation {
-        Label = x.Label, Country = x.Country, CityOrDistrict = x.CityOrDistrict,
-        Latitude = x.Latitude, Longitude = x.Longitude, RadiusKm = x.RadiusKm
-    });
+
+    var profileId = await db.CandidateProfiles
+        .Where(x => x.UserId == id)
+        .Select(x => (Guid?)x.Id)
+        .FirstOrDefaultAsync();
+
+    if (profileId is null)
+        return Results.NotFound();
+
+    await using var transaction = await db.Database.BeginTransactionAsync();
+
+    await db.SavedLocations
+        .Where(x => x.CandidateProfileId == profileId.Value)
+        .ExecuteDeleteAsync();
+
+    var entities = items.Select(x => new SavedLocation
+    {
+        CandidateProfileId = profileId.Value,
+        Label = x.Label,
+        Country = x.Country,
+        CityOrDistrict = x.CityOrDistrict,
+        Latitude = x.Latitude,
+        Longitude = x.Longitude,
+        RadiusKm = x.RadiusKm
+    }).ToList();
+
+    if (entities.Count > 0)
+        db.SavedLocations.AddRange(entities);
+
     await db.SaveChangesAsync();
-    return Results.Ok(p.SavedLocations);
+    await transaction.CommitAsync();
+
+    return Results.Ok(entities);
 });
 
 candidates.MapPost("/me/documents", async (HttpRequest request, ClaimsPrincipal principal, JobDropDbContext db, IConfiguration config) =>
