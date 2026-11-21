@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+﻿using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
@@ -59,6 +59,8 @@ builder.Services.AddCors(o => o.AddPolicy("Api", p =>
     p.AllowAnyHeader().AllowAnyMethod().WithOrigins(
         builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? ["http://localhost:3000"])));
 
+builder.Services.AddHostedService<Sprint2QueueWorker>();
+
 var app = builder.Build();
 app.UseCors("Api");
 app.UseAuthentication();
@@ -77,6 +79,7 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<JobDropDbContext>();
     await db.Database.EnsureCreatedAsync();
+    await Sprint2Schema.InitializeAsync(db);
     await SeedData.InitializeAsync(scope.ServiceProvider);
 }
 
@@ -583,6 +586,9 @@ admin.MapPost("/users/{id:guid}/deactivate", async (Guid id, UserManager<AppUser
     return Results.Ok(new { message = "User deactivated." });
 });
 
+// JOBDROP_SPRINT2_REGISTERED
+app.MapSprint2();
+
 app.Run();
 
 public static class Roles
@@ -724,6 +730,7 @@ public sealed class JobDropDbContext(DbContextOptions<JobDropDbContext> options)
     protected override void OnModelCreating(ModelBuilder b)
     {
         base.OnModelCreating(b);
+        Sprint2Schema.Configure(b);
         b.Entity<CandidateProfile>().HasIndex(x => x.UserId).IsUnique();
         b.Entity<CandidateProfile>().HasOne(x => x.User).WithOne().HasForeignKey<CandidateProfile>(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<CompanyMember>().HasIndex(x => new { x.CompanyId, x.UserId }).IsUnique();
@@ -820,3 +827,4 @@ public record InviteCompanyMemberRequest(string Email, CompanyMemberRole Role);
 public record AcceptInvitationRequest(string Token);
 public record InstitutionRequest(string Name, string? Type);
 public record ActivationRequest(bool IsActive);
+
