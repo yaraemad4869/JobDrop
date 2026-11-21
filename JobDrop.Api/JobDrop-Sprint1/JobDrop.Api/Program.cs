@@ -81,6 +81,7 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<JobDropDbContext>();
     await db.Database.EnsureCreatedAsync();
     await Sprint2Schema.InitializeAsync(db);
+    await Sprint3Schema.InitializeAsync(db);
     await SeedData.InitializeAsync(scope.ServiceProvider);
 }
 
@@ -589,6 +590,8 @@ admin.MapPost("/users/{id:guid}/deactivate", async (Guid id, UserManager<AppUser
 
 // JOBDROP_SPRINT2_REGISTERED
 app.MapSprint2();
+// JOBDROP_SPRINT3_REGISTERED
+app.MapSprint3();
 
 app.Run();
 
@@ -732,6 +735,7 @@ public sealed class JobDropDbContext(DbContextOptions<JobDropDbContext> options)
     {
         base.OnModelCreating(b);
         Sprint2Schema.Configure(b);
+        Sprint3Schema.Configure(b);
         b.Entity<CandidateProfile>().HasIndex(x => x.UserId).IsUnique();
         b.Entity<CandidateProfile>().HasOne(x => x.User).WithOne().HasForeignKey<CandidateProfile>(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<CompanyMember>().HasIndex(x => new { x.CompanyId, x.UserId }).IsUnique();
