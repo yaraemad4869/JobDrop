@@ -528,13 +528,13 @@ IF @lockResult < 0
         }).RequireAuthorization();
 
         jobs.MapGet("/", async (
-            string? search,
-            string? country,
-            string? city,
-            string? employmentType,
-            int page,
-            int pageSize,
-            JobDropDbContext db) =>
+            JobDropDbContext db,
+            string? search = null,
+            string? country = null,
+            string? city = null,
+            string? employmentType = null,
+            int page = 1,
+            int pageSize = 20) =>
         {
             page = Math.Max(1, page);
             pageSize = Math.Clamp(pageSize == 0 ? 20 : pageSize, 1, 100);
@@ -692,6 +692,10 @@ IF @lockResult < 0
             };
 
             db.Set<S2Application>().Add(application);
+
+            // Persist the parent application before inserting dependent records.
+            // The surrounding transaction keeps all writes atomic.
+            await db.SaveChangesAsync();
 
             if (!alreadyAppliedToCompany)
             {
@@ -919,7 +923,7 @@ IF @lockResult < 0
             });
         });
 
-        var recruitment = app.MapGroup("/api/recruitment").RequireAuthorization();
+        var recruitment = app.MapGroup("/api/recruitment");
 
         recruitment.MapGet("/pipeline", () => Results.Ok(new[]
         {

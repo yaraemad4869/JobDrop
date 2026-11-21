@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
@@ -66,10 +66,11 @@ app.UseCors("Api");
 app.UseAuthentication();
 app.UseAuthorization();
 
+app.MapGet("/", () => Results.Ok(new { service = "JobDrop API", sprint = 2, status = "ok" }));
+
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
-    app.MapGet("/", () => Results.Ok(new { service = "JobDrop API", sprint = 1, status = "development" }));
 }
 
 var storageRoot = Path.GetFullPath(builder.Configuration["Storage:Root"] ?? "App_Data/PrivateDocuments");
