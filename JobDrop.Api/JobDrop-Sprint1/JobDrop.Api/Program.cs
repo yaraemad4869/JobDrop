@@ -233,7 +233,9 @@ candidates.MapGet("/me", async (ClaimsPrincipal principal, JobDropDbContext db) 
 candidates.MapPut("/me", async (CandidateProfileRequest request, ClaimsPrincipal principal, JobDropDbContext db, UserManager<AppUser> users) =>
 {
     var id = UserId(principal);
-    if (!await users.IsInRoleAsync(await users.FindByIdAsync(id.ToString())!, Roles.JobSeeker))
+    var user = await users.FindByIdAsync(id.ToString());
+    if (user is null) return Results.Unauthorized();
+    if (!await users.IsInRoleAsync(user, Roles.JobSeeker))
         return Results.Forbid();
     var p = await db.CandidateProfiles.FirstOrDefaultAsync(x => x.UserId == id);
     if (p is null) { p = new CandidateProfile { UserId = id }; db.CandidateProfiles.Add(p); }
