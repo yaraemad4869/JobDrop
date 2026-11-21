@@ -1,0 +1,19 @@
+﻿JobDrop Candidate Fix Report
+Date: 11/21/2026 15:06:00
+API: http://localhost:5041
+QA Email: qa.fix.20261121150556@example.test
+Passed: 6
+Failed: 0
+
+
+Test                                Status Result
+----                                ------ ------
+Update Work Experience                 200 PASS  
+Update Education                       200 PASS  
+Update Candidate Skills                200 PASS  
+Update Certifications                  200 PASS  
+Update Saved Locations                 200 PASS  
+Get Candidate Profile After Updates    200 PASS  
+
+
+
