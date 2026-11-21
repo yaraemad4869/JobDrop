@@ -187,6 +187,15 @@ BEGIN
 END;
 ";
         await db.Database.ExecuteSqlRawAsync(sql);
+
+        await db.Database.ExecuteSqlRawAsync(@"
+IF OBJECT_ID(N'dbo.CandidateProfiles', N'U') IS NOT NULL
+   AND COL_LENGTH(N'dbo.CandidateProfiles', N'WorkEligibility') IS NULL
+BEGIN
+    ALTER TABLE dbo.CandidateProfiles
+    ADD WorkEligibility nvarchar(500) NULL;
+END;
+");
     }
 }
 

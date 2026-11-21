@@ -246,7 +246,7 @@ candidates.MapPut("/me", async (CandidateProfileRequest request, ClaimsPrincipal
     if (p is null) { p = new CandidateProfile { UserId = id }; db.CandidateProfiles.Add(p); }
     p.Headline = request.Headline; p.Summary = request.Summary; p.ResidenceCountry = request.ResidenceCountry;
     p.ResidenceCity = request.ResidenceCity; p.Phone = request.Phone; p.ProfilePhotoUrl = request.ProfilePhotoUrl;
-    p.Languages = request.Languages; p.PreferredWorkArrangement = request.PreferredWorkArrangement;
+    p.Languages = request.Languages; p.PreferredWorkArrangement = request.PreferredWorkArrangement; p.WorkEligibility = request.WorkEligibility;
     p.IsProfileVisible = request.IsProfileVisible; p.UpdatedAtUtc = DateTime.UtcNow;
     await db.SaveChangesAsync();
     return Results.Ok(p);
@@ -621,6 +621,7 @@ public sealed class CandidateProfile
     public string? ResidenceCountry { get; set; }
     public string? ResidenceCity { get; set; }
     public string? PreferredWorkArrangement { get; set; }
+    public string? WorkEligibility { get; set; }
     public string? Languages { get; set; }
     public string? ProfilePhotoUrl { get; set; }
     public bool IsProfileVisible { get; set; } = true;
@@ -820,7 +821,7 @@ public record ForgotPasswordRequest(string Email);
 public record ResetPasswordRequest(string Email, string Token, string NewPassword);
 public record ChangePasswordRequest(string CurrentPassword, string NewPassword);
 public record CandidateProfileRequest(string? Headline, string? Summary, string? Phone, string? ResidenceCountry,
-    string? ResidenceCity, string? PreferredWorkArrangement, string? Languages, string? ProfilePhotoUrl, bool IsProfileVisible);
+    string? ResidenceCity, string? PreferredWorkArrangement, string? Languages, string? ProfilePhotoUrl, bool IsProfileVisible, string? WorkEligibility = null);
 public record WorkExperienceRequest(string JobTitle, string? EmployerName, string? Description, DateOnly? StartDate, DateOnly? EndDate);
 public record EducationRequest(Guid? InstitutionId, string? Campus, string? Faculty, string? Program,
     string? FieldOfStudy, string? Qualification, EducationStatus Status, int? GraduationYear, Guid? EvidenceDocumentId);
