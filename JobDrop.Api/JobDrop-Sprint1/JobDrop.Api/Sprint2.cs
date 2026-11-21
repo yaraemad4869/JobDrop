@@ -497,11 +497,17 @@ IF @lockResult < 0
                 Status = "Draft"
             };
 
+            // Save the parent job before inserting dependent records.
+            // The transaction keeps the complete creation operation atomic.
+            await using var transaction = await db.Database.BeginTransactionAsync();
+
             db.Set<S2Job>().Add(job);
+            await db.SaveChangesAsync();
 
             foreach (var item in request.Requirements ?? [])
             {
                 if (string.IsNullOrWhiteSpace(item.Description)) continue;
+
                 db.Set<S2JobRequirement>().Add(new S2JobRequirement
                 {
                     JobId = job.Id,
@@ -515,6 +521,7 @@ IF @lockResult < 0
             {
                 if (string.IsNullOrWhiteSpace(item.PreferenceType) ||
                     string.IsNullOrWhiteSpace(item.Value)) continue;
+
                 db.Set<S2JobPreference>().Add(new S2JobPreference
                 {
                     JobId = job.Id,
@@ -524,6 +531,8 @@ IF @lockResult < 0
             }
 
             await db.SaveChangesAsync();
+            await transaction.CommitAsync();
+
             return Results.Created($"/api/jobs/{job.Id}", job);
         }).RequireAuthorization();
 
