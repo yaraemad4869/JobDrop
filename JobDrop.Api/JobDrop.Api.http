@@ -1,0 +1,6 @@
+@JobDrop.Api_HostAddress = http://localhost:5122
+
+GET {{JobDrop.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
