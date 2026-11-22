@@ -1,4 +1,4 @@
-using System.Security.Claims;
+﻿using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
 
 public sealed class S3MatchRule
@@ -349,16 +349,15 @@ public static class Sprint3Api
     private static async Task<(int Score, bool Eligible, string[] Missing)> ScoreCandidate(
         JobDropDbContext db, S2Job job, Guid profileId)
     {
-        var profile = await db.CandidateProfiles
+        var candidate = await db.CandidateProfiles
             .AsNoTracking()
+            .Where(x => x.Id == profileId)
             .Include(x => x.Skills)
             .Include(x => x.WorkExperiences)
             .Include(x => x.Educations)
                 .ThenInclude(x => x.Institution)
             .Include(x => x.Certifications)
-            .ToListAsync();
-
-        var candidate = profile.FirstOrDefault(x => x.Id == profileId);
+            .FirstOrDefaultAsync();
         if (candidate is null)
             return (0, false, new[] { "Candidate profile not found" });
 
@@ -618,7 +617,7 @@ public static class Sprint3Api
                 .Select(x => x.CandidateProfileId)
                 .Distinct().ToListAsync();
 
-            var results = new List<object>();
+            var results = new List<(int Score, object Item)>();
 
             foreach (var id in profileIds)
             {
@@ -628,7 +627,7 @@ public static class Sprint3Api
 
                 if (profile is null) continue;
 
-                results.Add(new
+                results.Add((match.Score, (object)new
                 {
                     candidateProfileId = id,
                     profile.Headline,
@@ -637,7 +636,7 @@ public static class Sprint3Api
                     match.Score,
                     match.Eligible,
                     match.Missing
-                });
+                }));
             }
 
             return Results.Ok(new
@@ -645,10 +644,11 @@ public static class Sprint3Api
                 total = results.Count,
                 page,
                 pageSize,
-                items = results.OrderByDescending(x =>
-                    ((dynamic)x).Score)
+                items = results.OrderByDescending(x => x.Score)
                     .Skip((page - 1) * pageSize)
-                    .Take(pageSize).ToList()
+                    .Take(pageSize)
+                    .Select(x => x.Item)
+                    .ToList()
             });
         });
 
