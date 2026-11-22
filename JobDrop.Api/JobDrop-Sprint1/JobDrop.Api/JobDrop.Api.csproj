@@ -23,4 +23,9 @@
     <Compile Remove="Backups/**/*.cs" />
     <Compile Remove="**/Backups/**/*.cs" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="**/*Backup*/**/*.cs" />
+  </ItemGroup>
 </Project>
+

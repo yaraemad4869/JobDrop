@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+﻿using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
@@ -62,6 +62,8 @@ builder.Services.AddCors(o => o.AddPolicy("Api", p =>
 
 builder.Services.AddHostedService<Sprint2QueueWorker>();
 
+builder.Services.AddHostedService<Sprint5NotificationWorker>();
+
 var app = builder.Build();
 app.UseCors("Api");
 app.UseAuthentication();
@@ -84,6 +86,7 @@ using (var scope = app.Services.CreateScope())
     await Sprint2Schema.InitializeAsync(db);
     await Sprint3Schema.InitializeAsync(db);
     await Sprint4Schema.InitializeAsync(db);
+        await Sprint5Schema.InitializeAsync(db);
     await SeedData.InitializeAsync(scope.ServiceProvider);
 }
 
@@ -595,6 +598,7 @@ app.MapSprint2();
 // JOBDROP_SPRINT3_REGISTERED
 app.MapSprint3();
 app.MapSprint4();
+app.MapSprint5();
 
 app.Run();
 
@@ -741,6 +745,7 @@ public sealed class JobDropDbContext(DbContextOptions<JobDropDbContext> options)
         Sprint2Schema.Configure(b);
         Sprint3Schema.Configure(b);
         Sprint4Schema.Configure(b);
+        Sprint5Schema.Configure(b);
         b.Entity<CandidateProfile>().HasIndex(x => x.UserId).IsUnique();
         b.Entity<CandidateProfile>().HasOne(x => x.User).WithOne().HasForeignKey<CandidateProfile>(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<CompanyMember>().HasIndex(x => new { x.CompanyId, x.UserId }).IsUnique();
@@ -837,3 +842,6 @@ public record InviteCompanyMemberRequest(string Email, CompanyMemberRole Role);
 public record AcceptInvitationRequest(string Token);
 public record InstitutionRequest(string Name, string? Type);
 public record ActivationRequest(bool IsActive);
+
+
+
